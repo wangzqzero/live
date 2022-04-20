@@ -68,9 +68,9 @@ target_compile_features( push_stream PRIVATE cxx_std_20 )
 ## target相关的语句用于定义来约束link、compile等相关属性的scope。
 #set(CMAKE_CXX_STANDARD 20)
 #set(CMAKE_CXX_STANDARD_REQUIRED ON)
-find_package(OpenCV REQUIRED)
-include_directories(${OpenCV_INCLUDE_DIRS})
-target_link_libraries(push_stream ${OpenCV_LIBRARIES})
+#find_package(OpenCV REQUIRED)
+#include_directories(${OpenCV_INCLUDE_DIRS})
+#target_link_libraries(push_stream ${OpenCV_LIBRARIES})
 
 set(FFMPEG_ROOT "/usr")
 target_link_libraries(push_stream
@@ -84,6 +84,7 @@ target_link_libraries(push_stream
     "${FFMPEG_ROOT}/lib/libavcodec.so"
     "${FFMPEG_ROOT}/lib/libasound.so"
     "${FFMPEG_ROOT}/lib/libpthread.so"
+    "${FFMPEG_ROOT}/lib/libmysqlpp.so.3.3.0"
 )
 find_package(Boost REQUIRED COMPONENTS thread)
 
