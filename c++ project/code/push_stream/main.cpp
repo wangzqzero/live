@@ -278,6 +278,7 @@
 //            }
 //            if (av_frame_make_writable(pframe) < 0)cout<<"dslf"<<endl;
 //            sws_scale(img_convert_ctx, (const unsigned char* const*)videoFrame->data, videoFrame->linesize, 0, videoFrame->height, pframe->data,  pframe->linesize);
+//            fprintf(stdout, " transcode frame %d : %d, %d into %d, %d\n", videoFrame->pts, videoFrame->width, videoFrame->height, pframe->width, pframe->height);
 ////            pframe->pts = pframe->pkt_dts = pframe->pkt_pts =40 *packetCount;
 ////            av_opt_set(encodeContext->priv_data, "tune", "zerolatency", 0);
 ////            cout<<avcodec_send_frame(encodeContext,pframe)<<endl;
@@ -394,6 +395,7 @@ using namespace::std;
 #define VIDEO_WIDTH  1280
 #define VIDEO_HEIGHT 720
 
+
 //存放从摄像头读出转换之后的数据
 unsigned char YUV420P_Buffer[VIDEO_WIDTH*VIDEO_HEIGHT*3/2];
 unsigned char YUV420P_Buffer_temp[VIDEO_WIDTH*VIDEO_HEIGHT*3/2];
@@ -427,19 +429,13 @@ FILE *pcm_data_file=NULL;
 snd_pcm_uframes_t buffer_frames;
 snd_pcm_t *capture_handle;
 snd_pcm_format_t format=AudioFormat;
-
+int64_t lastReadPacktTime;
 
 //保存音频数据链表
 struct AUDIO_DATA
 {
     unsigned char* audio_buffer;
     struct AUDIO_DATA *next;
-};
-
-//保存视频数据链表
-struct VIDEO_DATA{
-    AVFrame* video_frame;
-    struct VIDEO_DATA *next;
 };
 
 //定义一个链表头
@@ -451,7 +447,7 @@ int List_GetNodeCnt(struct AUDIO_DATA *head);
 
 
 void Init();
-int openInput(string inputUrl);
+int openInput(string inputUrl,string format);
 int InitDecodeContext(AVStream *inputStream);
 AVPacket * ReadPacketFromSource();
 int decode_video(AVPacket *packet, AVCodecContext *pdecoderCtx, int owidth, int oheight);
@@ -479,13 +475,13 @@ typedef struct OutputStream {
 static int write_frame(AVFormatContext *fmt_ctx, const AVRational *time_base, AVStream *st, AVPacket *pkt)
 {
     /*将输出数据包时间戳值从编解码器重新调整为流时基 */
-//    printf("index %d\n",pkt->stream_index);
-//    printf("pts  %ld\n",pkt->pts);
+    //    printf("index %d\n",pkt->stream_index);
+    //    printf("pts  %ld\n",pkt->pts);
     av_packet_rescale_ts(pkt, *time_base, st->time_base);
-//    printf("pts point %f\n",(pkt->pts * st->time_base.num/(double)st->time_base.den));
-//    printf("pts %ld time base num %d den %d\n",pkt->pts,time_base->num,time_base->den);
+    //    printf("pts point %f\n",(pkt->pts * st->time_base.num/(double)st->time_base.den));
+    //    printf("pts %ld time base num %d den %d\n",pkt->pts,time_base->num,time_base->den);
     pkt->stream_index = st->index; //stream_index 用于标识该avpacket的类型（音频视频）
-//    printf("reindex %d\n",pkt->stream_index);
+    //    printf("reindex %d\n",pkt->stream_index);
 
     /*将压缩的帧写入媒体文件*/
     return av_interleaved_write_frame(fmt_ctx, pkt);
@@ -531,15 +527,17 @@ static void add_stream(OutputStream *ost, AVFormatContext *oc,
         c->channels= av_get_channel_layout_nb_channels(AV_CH_LAYOUT_STEREO);
         c->channel_layout = AV_CH_LAYOUT_STEREO;// AV_CH_LAYOUT_MONO 单声道   AV_CH_LAYOUT_STEREO 立体声
         ost->st->time_base = (AVRational){ 1, c->sample_rate };
-//        c->time_base = ost->st->time_base;
+        //        c->time_base = ost->st->time_base;
         break;
 
     case AVMEDIA_TYPE_VIDEO:
+        AVCodec *pic;
+        pic = *codec;
         av_opt_set(c->priv_data, "tune", "zerolatency", 0);
-//        av_opt_set(c->priv_data, "preset", "superfast", 0);
+        av_opt_set(c->priv_data, "preset", "superfast", 0);
         c->codec_id = codec_id;
         //码率：影响体积，与体积成正比：码率越大，体积越大；码率越小，体积越小。
-        c->bit_rate = 400000; //设置码率 400kps
+        c->bit_rate = 4000000; //设置码率 码率会影响视频的清晰度 400kps
         /*分辨率必须是2的倍数。 */
         c->width    =VIDEO_WIDTH;
         c->height   = VIDEO_HEIGHT;
@@ -550,7 +548,7 @@ static void add_stream(OutputStream *ost, AVFormatContext *oc,
         ost->st->time_base = (AVRational){1,STREAM_FRAME_RATE};
         c->time_base       = ost->st->time_base;
         c->gop_size      = 5; /* 最多每十二帧发射一帧I帧 */
-        c->pix_fmt       = STREAM_PIX_FMT;
+        c->pix_fmt       = *pic->pix_fmts;
         c->max_b_frames = 0;  //不要B帧
         if (c->codec_id == AV_CODEC_ID_MPEG1VIDEO)
         {
@@ -744,11 +742,11 @@ static int write_audio_frame(AVFormatContext *oc, OutputStream *ost)
     }
 
     avcodec_encode_audio2(c, &pkt, frame, &got_packet);
-//    printf("frame pts %ld\n",pkt.pts);
-//    printf("audio pts %d\n",frame->pts);
+    //    printf("frame pts %ld\n",pkt.pts);
+    //    printf("audio pts %d\n",frame->pts);
     if (got_packet)
     {
-//        printf(" audio ");
+        //        printf(" audio ");
         write_frame(oc, &c->time_base, ost->st, &pkt);
     }
     av_packet_unref(&pkt);
@@ -848,10 +846,10 @@ static int write_video_frame(AVFormatContext *oc, OutputStream *ost)
 
     /* 编码图像 */
     ret=avcodec_encode_video2(c, pkt, frame, &got_packet);
-//    printf("video pts %d\n",frame->pts);
+    //    printf("video pts %d\n",frame->pts);
     if(got_packet)
     {
-//        printf(" video  ");
+        //        printf(" video  ");
         ret=write_frame(oc, &c->time_base, ost->st, pkt);
     }
     else
@@ -928,16 +926,17 @@ int video_audio_encode(char *filename)
 
     /* 编写流头（如果有）*/
     avformat_write_header(oc,&opt);
-    //    struct timeval start, end;
-    //    gettimeofday( &start, NULL );
+    struct timeval start, end;
+    gettimeofday( &start, NULL );
     //    int k = 0, l = 0;
     while(encode_video || encode_audio)
     {
-//                printf("video pts %d, audio pts %d\n",video_st.enc->time_base.den,audio_st.enc->time_base.den);
-//          printf("compare %d\n",av_compare_ts(video_st.next_pts, video_st.enc->time_base,audio_st.next_pts, audio_st.enc->time_base));
+        gettimeofday( &start, NULL );
+        //                printf("video pts %d, audio pts %d\n",video_st.enc->time_base.den,audio_st.enc->time_base.den);
+        //          printf("compare %d\n",av_compare_ts(video_st.next_pts, video_st.enc->time_base,audio_st.next_pts, audio_st.enc->time_base));
         /* 选择要编码的流*/
-//        printf("video pts %ld, video time base %f; audio pts %ld, audio time base %f\n",video_st.next_pts,video_st.next_pts/(double)video_st.enc->time_base.den,audio_st.next_pts,audio_st.next_pts/(double)audio_st.enc->time_base.den);
-//        printf("encode_video %d, encode_audio %d\n",encode_video,encode_audio);
+        //        printf("video pts %ld, video time base %f; audio pts %ld, audio time base %f\n",video_st.next_pts,video_st.next_pts/(double)video_st.enc->time_base.den,audio_st.next_pts,audio_st.next_pts/(double)audio_st.enc->time_base.den);
+        //        printf("encode_video %d, encode_audio %d\n",encode_video,encode_audio);
         if(encode_video &&(!encode_audio || av_compare_ts(video_st.next_pts, video_st.enc->time_base,audio_st.next_pts, audio_st.enc->time_base) <= 0))
         {
             //            printf("视频编码一次----->    1  %d\n",k);
@@ -950,8 +949,8 @@ int video_audio_encode(char *filename)
             //            l++;
             encode_audio = !write_audio_frame(oc,&audio_st);
         }
-        //        gettimeofday( &end, NULL );
-        //        printf("%ld\n",end.tv_sec-start.tv_sec);
+        gettimeofday( &end, NULL );
+        printf("%ld  %ld\n",end.tv_sec-start.tv_sec,end.tv_usec-start.tv_usec);
     }
 
     av_write_trailer(oc);
@@ -1132,6 +1131,7 @@ int main(int argc,char **argv)
     pthread_t thread_id;
 
     //创建链表头
+    list_head = List_CreateHead(list_head);
 
     /*初始化互斥锁*/
     pthread_mutex_init(&mutex,NULL);
@@ -1142,9 +1142,9 @@ int main(int argc,char **argv)
     pthread_mutex_init(&mutex_audio,NULL);
 
     /*初始化摄像头设备*/
-//    err=VideoDeviceInit("/dev/video0");// /dev/video0
+    //    err=VideoDeviceInit("/dev/video0");// /dev/video0
     Init();
-    int ret = openInput(":0.0+0,0");// /dev/video0 :0.0+0,0
+    int ret = openInput("/dev/video0","video4linux2");// /dev/video0 :0.0+0,0   // video4linux2 x11grab
     if(ret >= 0){
         InitDecodeContext(inputContext->streams[ret]);
     }else{
@@ -1184,7 +1184,7 @@ struct AUDIO_DATA *List_CreateHead(struct AUDIO_DATA *head)
     if(head==NULL)
     {
         head = new AUDIO_DATA;
-        //        head=malloc(sizeof(struct AUDIO_DATA));
+        //                head=malloc(sizeof(struct AUDIO_DATA));
         head->next=NULL;
     }
     return head;
@@ -1330,7 +1330,7 @@ int capture_audio_data_init( char *audio_dev)
     }
     printf("采样率设置成功\n");
 
-//     设置周期大小（将配置空间限制为最接近目标的周期大小）
+    //     设置周期大小（将配置空间限制为最接近目标的周期大小）
     if((err = snd_pcm_hw_params_set_period_size_near(capture_handle,hw_params,&buffer_frames,&dir)) < 0){
         printf("无法设置周期大小(%s)\n",snd_strerror(err));
         exit(1);
@@ -1338,30 +1338,30 @@ int capture_audio_data_init( char *audio_dev)
     printf("周期大小设置成功\n");
 
     unsigned int buffer_time,period_time;
-//    //获取最大的缓冲时间,buffer_time单位为us,500000us=0.5s
+    //    //获取最大的缓冲时间,buffer_time单位为us,500000us=0.5s
     snd_pcm_hw_params_get_buffer_time_max(hw_params, &buffer_time, 0);
     printf("buffer_time:%d\n",buffer_time);
     unsigned int val =0;
     snd_pcm_hw_params_get_period_time(hw_params,&val,&dir);
     printf("period_time:%d\n",val);
-//    if ( buffer_time >500000)
-//        buffer_time = 500000;
+    //    if ( buffer_time >500000)
+    //        buffer_time = 500000;
 
-//    //设置缓冲时间
-//    err = snd_pcm_hw_params_set_buffer_time_near(capture_handle, hw_params, &buffer_time, 0);
-//    if (err < 0)
-//    {
-//        printf("Failed to set PCM device to sample rate\n");
-//        exit(1);
-//    }
-//    //设置周期时间
-//    period_time = 26315;
-//    err = snd_pcm_hw_params_set_period_time_near(capture_handle, hw_params, &period_time, 0);
-//    if (err < 0)
-//    {
-//        printf("Failed to set PCM device to period time\n");
-//        exit(1);
-//    }
+    //    //设置缓冲时间
+    //    err = snd_pcm_hw_params_set_buffer_time_near(capture_handle, hw_params, &buffer_time, 0);
+    //    if (err < 0)
+    //    {
+    //        printf("Failed to set PCM device to sample rate\n");
+    //        exit(1);
+    //    }
+    //    //设置周期时间
+    //    period_time = 26315;
+    //    err = snd_pcm_hw_params_set_period_time_near(capture_handle, hw_params, &period_time, 0);
+    //    if (err < 0)
+    //    {
+    //        printf("Failed to set PCM device to period time\n");
+    //        exit(1);
+    //    }
 
     /*将配置写入驱动程序中，并判断是否配置成功*/
     if ((err=snd_pcm_hw_params (capture_handle,hw_params))<0)
@@ -1462,16 +1462,25 @@ void Init(){
     avdevice_register_all();
     av_log_set_level(AV_LOG_WARNING);
 }
-
-int openInput(string inputUrl)
+static int interrupt_cb(void *ctx)
+{
+    int timeout = 3;
+    if(av_gettime() - lastReadPacktTime > timeout * 1000 * 1000)
+    {
+        return -1;
+    }
+    return 0;
+}
+int openInput(string inputUrl, string format)
 {
     inputContext = avformat_alloc_context();
-//    lastReadPacktTime = av_gettime();
-//    inputContext->interrupt_callback.callback = interrupt_cb;
+    lastReadPacktTime = av_gettime();
+    inputContext->interrupt_callback.callback = interrupt_cb;
 
-    AVInputFormat *ifmt = av_find_input_format("x11grab");// video4linux2
+    AVInputFormat *ifmt = av_find_input_format(format.data());// video4linux2 x11grab
     AVDictionary *format_opts = nullptr;
-    av_dict_set_int(&format_opts,"rtbufsize",18432000, 0);
+    av_dict_set_int(&format_opts,"rtbufsize",1843200, 0);
+    av_dict_set(&format_opts,"start_time_realtime",0,0);
 
     int ret = avformat_open_input(&inputContext, inputUrl.c_str(),ifmt, &format_opts);
     if(ret < 0)
@@ -1507,8 +1516,9 @@ int InitDecodeContext(AVStream *inputStream){
         return -1;
     }
     AVCodecContext *vc = inputStream->codec; // avcodec_alloc_context3(codec);
-//    avcodec_parameters_to_context(vc, inputStream->codecpar);
+    //    avcodec_parameters_to_context(vc, inputStream->codecpar);
     int ret = avcodec_open2(vc, codec, NULL);
+    printf("iput width %d   height %d\n",inputStream->codecpar->width,inputStream->codecpar->height);
     return ret;
 }
 
@@ -1544,7 +1554,7 @@ int decode_video(AVPacket *packet, AVCodecContext *pdecoderCtx, int owidth, int 
     size_t size = av_image_get_buffer_size(outFormat, owidth, oheight, 1);
     uint8_t *pbuffer = (uint8_t *)malloc(size);
     static int count = 0;
-    ptranscodedFrame->format = AV_PIX_FMT_YUV420P;
+    ptranscodedFrame->format = outFormat;
     ptranscodedFrame->width = VIDEO_WIDTH;
     ptranscodedFrame->height = VIDEO_HEIGHT;
     do
@@ -1563,14 +1573,14 @@ int decode_video(AVPacket *packet, AVCodecContext *pdecoderCtx, int owidth, int 
             if (av_frame_make_writable(pdecodeFrame) < 0)printf("pdecodeFrame is don't write\n");
             ret = sws_scale(psws, pdecodeFrame->data, pdecodeFrame->linesize, 0, pdecodeFrame->height, ptranscodedFrame->data, ptranscodedFrame->linesize);
             AVERR_BREAK_RET_LT_ZERO(ret);
-            fprintf(stderr, "%d, transcode frame %d : %d, %d into %d, %d\n", count, pdecodeFrame->pts, pdecoderCtx->width, pdecoderCtx->height, owidth, oheight);
+            //            fprintf(stdout, "%d, transcode frame %d : %d, %d into %d, %d\n", count, pdecodeFrame->pts, pdecoderCtx->width, pdecoderCtx->height, owidth, oheight);
             pthread_mutex_lock(&mutex);   /*互斥锁上锁*/
-//            yuyv_to_yuv420p(image_buffer[video_buffer.index],YUV420P_Buffer,VIDEO_WIDTH,VIDEO_HEIGHT);
+            //            yuyv_to_yuv420p(image_buffer[video_buffer.index],YUV420P_Buffer,VIDEO_WIDTH,VIDEO_HEIGHT);
             memcpy(YUV420P_Buffer,pbuffer,size);
 
             pthread_mutex_unlock(&mutex); /*互斥锁解锁*/
             pthread_cond_broadcast(&cond);/*广播方式唤醒休眠的线程*/
-//            fwrite(pbuffer, 1, size, fp);
+            //            fwrite(pbuffer, 1, size, fp);
             count++;
         }
     } while (false);
@@ -1603,10 +1613,22 @@ void *pthread_read_video_data1(void *arg)
     gettimeofday( &start, NULL );
     int i = 0;
     /*2. 申请存放JPG的数据空间*/
+    //    VIDEO_WIDTH = inputContext->streams[0]->codecpar->width;
+    //    VIDEO_HEIGHT = inputContext->streams[0]->codecpar->height;
 
     while(1)
     {
+        gettimeofday( &start, NULL );
         AVPacket *pkt = nullptr;
+        //        for(int i = 0; i < 100;){
+        //            pkt = ReadPacketFromSource();
+        //            if(pkt){
+        //                i++;
+        //            }
+        //            av_packet_free(&pkt);
+        //        }
+        //        gettimeofday( &end, NULL );
+        //        printf("time of get 10  video   %ld  %ld\n",end.tv_sec-start.tv_sec,end.tv_usec-start.tv_usec);
         pkt = ReadPacketFromSource();
         if(pkt){
             decode_video(pkt,inputContext->streams[0]->codec,VIDEO_WIDTH,VIDEO_HEIGHT);
@@ -1614,11 +1636,34 @@ void *pthread_read_video_data1(void *arg)
         av_packet_free(&pkt);
         /*(1)等待摄像头采集数据,如果没有数据就进行等待，直到有数据才继续执行*/
         gettimeofday( &end, NULL );
-        printf("video   %ld  %ld\n",end.tv_sec-start.tv_sec,end.tv_usec-start.tv_usec);
+        //        printf("time of video   %ld  %ld\n",end.tv_sec-start.tv_sec,end.tv_usec-start.tv_usec);
         i++;
 
     }
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
