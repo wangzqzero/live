@@ -83,7 +83,6 @@ target_link_libraries(push_stream
     "${FFMPEG_ROOT}/lib/libavformat.so"
     "${FFMPEG_ROOT}/lib/libavcodec.so"
     "${FFMPEG_ROOT}/lib/libasound.so"
-    "${FFMPEG_ROOT}/lib/libpthread.so"
     "${FFMPEG_ROOT}/lib/libmysqlpp.so.3.3.0"
 )
 find_package(Boost REQUIRED COMPONENTS thread)
@@ -93,3 +92,6 @@ target_link_libraries(push_stream ${Boost_LIBRARIES})
 
 target_link_libraries(push_stream "/usr/lib/libasound.so.2")
 
+find_package(OpenCV REQUIRED)
+include_directories(${OpenCV_INCLUDE_DIRS})
+target_link_libraries(push_stream ${OpenCV_LIBRARIES})
